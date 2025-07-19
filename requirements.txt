@@ -1,0 +1,3 @@
+# Core dependencies for the evolutionary agent simulation
+torch>=2.0.0
+arcade>=2.6.0
