@@ -2,6 +2,10 @@
 
 An evolutionary simulation featuring 100 neural network-controlled agents that compete for survival in a 2D environment.
 
+## Important
+
+**This code has been entirely written through vibe coding. I described my ideas in every single detail and Cline implemented everything (ok, I may have manually changed 5 lines of code). The purpose of this was to have my first full-vibe-coding experience, and I was simply blown away with the final result.**
+
 ## Overview
 
 This simulation implements an evolutionary algorithm where agents with simple neural networks learn to survive by:
