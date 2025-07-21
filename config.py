@@ -29,8 +29,9 @@ ENERGY_FROM_FOOD = 50
 # Evolution parameters
 NUM_GENERATIONS = 1000
 ITERATIONS_PER_GENERATION = 500
-SURVIVAL_RATE = 0.1  # Top 10%
+SURVIVAL_RATE = 0.2  # Top 20%
 MUTATION_VARIANCE = 0.05
+CROSSOVER_PROPORTION = 0.5  # 50% of offspring created through crossover, 50% through mutation
 
 NUM_EVALUATION_RUNS = 30  # Number of runs to average performance over
 EVALUATION_ITERATIONS = 500  # Number of iterations per evaluation run
