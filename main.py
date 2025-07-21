@@ -184,6 +184,14 @@ class EvolutionSimulation(arcade.Window):
         """End the simulation and display final results."""
         self.simulation_running = False
         
+        # Save the best agent
+        if self.evolution_manager.save_best_agent("best_agent.pth"):
+            print("Best agent saved successfully!")
+        
+        # Generate evolution plots
+        print("Generating evolution plots...")
+        self.evolution_manager.generate_evolution_plots("evolution_plots")
+        
         # Print final summary
         summary = self.evolution_manager.get_evolution_summary()
         print("=" * 50)

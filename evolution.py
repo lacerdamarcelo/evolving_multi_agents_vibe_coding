@@ -3,13 +3,14 @@ Evolutionary algorithm implementation for agent evolution.
 """
 
 import random
-import math
+import numpy as np
+import torch
 from agent import Agent
-from neural_network import create_offspring_network
+from neural_network import create_offspring_network, create_crossover_offspring
 from agent_evaluator import AgentEvaluator
 from config import (
     POPULATION_SIZE, SURVIVAL_RATE, ENVIRONMENT_WIDTH, ENVIRONMENT_HEIGHT,
-    NUM_EVALUATION_RUNS, EVALUATION_ITERATIONS
+    NUM_EVALUATION_RUNS, EVALUATION_ITERATIONS, CROSSOVER_PROPORTION
 )
 
 
@@ -23,6 +24,13 @@ class EvolutionManager:
         self.generation = 0
         self.generation_stats = []
         self.agent_evaluator = AgentEvaluator()
+        self.best_agent_ever = None
+        self.best_fitness_ever = -1
+        
+        # Additional tracking for visualization
+        self.best_fitness_history = []  # Track best fitness per generation
+        self.population_fitness_history = []  # Track all fitness values per generation
+        self.survival_rate_history = []  # Track survival rates per generation
     
     def select_survivors(self, agents):
         """
@@ -75,12 +83,46 @@ class EvolutionManager:
             new_agent = self._create_agent_from_survivor(survivor)
             new_agents.append(new_agent)
         
-        # Create offspring to fill remaining population
-        while len(new_agents) < POPULATION_SIZE:
-            # Randomly select a parent from survivors
-            parent = random.choice(survivors)
-            offspring = self._create_offspring(parent)
-            new_agents.append(offspring)
+        # Calculate how many offspring to create
+        num_offspring_needed = POPULATION_SIZE - len(new_agents)
+        
+        if len(survivors) > 1:
+            # Calculate proportions of crossover vs mutation offspring
+            num_crossover_offspring = int(num_offspring_needed * CROSSOVER_PROPORTION)
+            num_mutation_offspring = num_offspring_needed - num_crossover_offspring
+            
+            print(f"Creating {num_crossover_offspring} crossover offspring and {num_mutation_offspring} mutation offspring")
+            
+            # Create crossover offspring
+            for _ in range(num_crossover_offspring):
+                parent1 = random.choice(survivors)
+                parent2 = random.choice(survivors)
+                # Ensure different parents
+                while parent2 == parent1 and len(survivors) > 1:
+                    parent2 = random.choice(survivors)
+                offspring = self._create_crossover_offspring(parent1, parent2)
+                new_agents.append(offspring)
+            
+            # Create mutation-only offspring
+            for _ in range(num_mutation_offspring):
+                parent = random.choice(survivors)
+                offspring = self._create_offspring(parent)
+                new_agents.append(offspring)
+        else:
+            # Single survivor - create all offspring through mutation
+            print(f"Single survivor: creating {num_offspring_needed} mutation offspring")
+            for _ in range(num_offspring_needed):
+                parent = random.choice(survivors)
+                offspring = self._create_offspring(parent)
+                new_agents.append(offspring)
+        
+        # Apply mutation to all crossover offspring
+        crossover_start_idx = len(survivors)
+        crossover_end_idx = crossover_start_idx + (int(num_offspring_needed * CROSSOVER_PROPORTION) if len(survivors) > 1 else 0)
+        
+        for i in range(crossover_start_idx, crossover_end_idx):
+            if i < len(new_agents):
+                new_agents[i].neural_network.mutate()
         
         return new_agents
     
@@ -130,6 +172,51 @@ class EvolutionManager:
         
         return offspring
     
+    def _create_crossover_offspring(self, parent1, parent2):
+        """
+        Create an offspring agent from two parents using crossover.
+        
+        Args:
+            parent1: First parent agent
+            parent2: Second parent agent
+            
+        Returns:
+            Agent: Offspring agent with crossed-over neural network
+        """
+        # Random position for offspring
+        x = random.uniform(0, ENVIRONMENT_WIDTH)
+        y = random.uniform(0, ENVIRONMENT_HEIGHT)
+        orientation = random.uniform(0, 360)
+        
+        # Create new agent
+        offspring = Agent(x, y, orientation)
+        
+        # Create crossed-over neural network
+        offspring.neural_network = create_crossover_offspring(parent1.neural_network, parent2.neural_network)
+        
+        return offspring
+    
+    def _create_agent_copy(self, agent):
+        """
+        Create a deep copy of an agent for saving the best agent.
+        
+        Args:
+            agent: Agent to copy
+            
+        Returns:
+            Agent: Deep copy of the agent
+        """
+        # Create new agent with same position and orientation
+        copy_agent = Agent(agent.x, agent.y, agent.orientation)
+        copy_agent.energy = agent.energy
+        copy_agent.food_count = agent.food_count
+        copy_agent.alive = agent.alive
+        
+        # Copy neural network weights
+        copy_agent.neural_network.copy_weights_from(agent.neural_network)
+        
+        return copy_agent
+    
     def _create_random_population(self):
         """
         Create a completely random population (used when no survivors).
@@ -165,6 +252,12 @@ class EvolutionManager:
                                  key=lambda agent: (agent.food_count, agent.energy), 
                                  reverse=True)
         best_performer = all_agents_sorted[0] if all_agents_sorted else None
+        
+        # Update best agent ever
+        if best_performer and best_performer.food_count > self.best_fitness_ever:
+            self.best_fitness_ever = best_performer.food_count
+            self.best_agent_ever = self._create_agent_copy(best_performer)
+            print(f"New best agent found! Fitness: {self.best_fitness_ever}")
         
         # Calculate generation statistics
         stats = self._calculate_generation_stats(current_agents, living_agents)
@@ -265,6 +358,20 @@ class EvolutionManager:
         # Get evaluation summary
         evaluation_summary = self.agent_evaluator.get_evaluation_summary(evaluated_population)
         
+        # Find the best performer based on average evaluation performance
+        if evaluated_population:
+            # Get the best agent from evaluation results (already sorted by average performance)
+            best_agent, best_results = evaluated_population[0]
+            best_avg_fitness = best_results['avg_food_count']
+            
+            # Update best agent ever based on average performance
+            if best_avg_fitness > self.best_fitness_ever:
+                self.best_fitness_ever = best_avg_fitness
+                self.best_agent_ever = self._create_agent_copy(best_agent)
+                print(f"New best agent found! Average fitness: {self.best_fitness_ever:.2f} "
+                      f"(survival rate: {best_results['survival_rate']:.1%}, "
+                      f"std: {best_results['std_food_count']:.2f})")
+        
         # Select top performers based on average performance
         selected_agents = self.agent_evaluator.select_top_agents(evaluated_population)
         
@@ -280,6 +387,9 @@ class EvolutionManager:
         
         self.generation_stats.append(stats)
         
+        # Track data for visualization
+        self._update_visualization_data(evaluated_population, evaluation_summary)
+        
         # Create next generation from selected agents
         new_agents = self.create_next_generation(selected_agents)
         
@@ -293,7 +403,266 @@ class EvolutionManager:
         
         return new_agents, stats, evaluation_summary
     
+    def save_best_agent(self, filename="best_agent.pth"):
+        """
+        Save the best agent to a file.
+        
+        Args:
+            filename: Name of the file to save the best agent
+        """
+        if self.best_agent_ever is None:
+            print("No best agent to save!")
+            return False
+        
+        agent_data = {
+            'neural_network_weights': self.best_agent_ever.neural_network.get_weights_as_dict(),
+            'fitness': self.best_fitness_ever,
+            'generation_found': self.generation,
+            'x': self.best_agent_ever.x,
+            'y': self.best_agent_ever.y,
+            'orientation': self.best_agent_ever.orientation,
+            'energy': self.best_agent_ever.energy,
+            'food_count': self.best_agent_ever.food_count
+        }
+        
+        torch.save(agent_data, filename)
+        print(f"Best agent saved to {filename} (average fitness: {self.best_fitness_ever:.2f})")
+        return True
+    
+    def load_best_agent(self, filename="best_agent.pth"):
+        """
+        Load the best agent from a file.
+        
+        Args:
+            filename: Name of the file to load the best agent from
+            
+        Returns:
+            Agent: Loaded agent or None if loading failed
+        """
+        try:
+            agent_data = torch.load(filename)
+            
+            # Create new agent
+            agent = Agent(
+                agent_data['x'], 
+                agent_data['y'], 
+                agent_data['orientation']
+            )
+            agent.energy = agent_data['energy']
+            agent.food_count = agent_data['food_count']
+            
+            # Load neural network weights
+            agent.neural_network.set_weights_from_dict(agent_data['neural_network_weights'])
+            
+            print(f"Best agent loaded from {filename} (average fitness: {agent_data['fitness']:.2f})")
+            return agent
+            
+        except Exception as e:
+            print(f"Failed to load best agent from {filename}: {e}")
+            return None
+    
+    def _update_visualization_data(self, evaluated_population, evaluation_summary):
+        """
+        Update data tracking for visualization.
+        
+        Args:
+            evaluated_population: List of (agent, evaluation_results) tuples
+            evaluation_summary: Summary of evaluation results
+        """
+        # Track best fitness (average) for this generation
+        best_avg_fitness = evaluation_summary.get('best_avg_food_count', 0)
+        self.best_fitness_history.append(best_avg_fitness)
+        
+        # Track all fitness values for this generation (for box plots)
+        generation_fitness = [results['avg_food_count'] for _, results in evaluated_population]
+        self.population_fitness_history.append(generation_fitness)
+        
+        # Track survival rates for this generation
+        generation_survival_rates = [results['survival_rate'] for _, results in evaluated_population]
+        avg_survival_rate = sum(generation_survival_rates) / len(generation_survival_rates)
+        self.survival_rate_history.append(avg_survival_rate)
+    
+    def generate_evolution_plots(self, save_dir="evolution_plots"):
+        """
+        Generate and save evolution visualization plots.
+        
+        Args:
+            save_dir: Directory to save the plots
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import os
+        
+        # Create directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Set up the plotting style
+        plt.style.use('default')
+        
+        # Generate plots
+        self._plot_best_fitness_evolution(save_dir)
+        self._plot_population_fitness_boxplots(save_dir)
+        self._plot_survival_rate_evolution(save_dir)
+        self._plot_combined_overview(save_dir)
+        
+        print(f"Evolution plots saved to '{save_dir}' directory")
+    
+    def _plot_best_fitness_evolution(self, save_dir):
+        """Plot the evolution of best fitness over generations."""
+        import matplotlib.pyplot as plt
+        
+        plt.figure(figsize=(12, 6))
+        generations = range(1, len(self.best_fitness_history) + 1)
+        
+        plt.plot(generations, self.best_fitness_history, 'b-', linewidth=2, marker='o', markersize=4)
+        plt.title('Evolution of Best Fitness Across Generations', fontsize=14, fontweight='bold')
+        plt.xlabel('Generation', fontsize=12)
+        plt.ylabel('Best Average Fitness (Food Count)', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        
+        # Add trend line
+        if len(self.best_fitness_history) > 1:
+            z = np.polyfit(generations, self.best_fitness_history, 1)
+            p = np.poly1d(z)
+            plt.plot(generations, p(generations), "r--", alpha=0.8, linewidth=1, 
+                    label=f'Trend (slope: {z[0]:.3f})')
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/best_fitness_evolution.png", dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_population_fitness_boxplots(self, save_dir):
+        """Plot box plots of population fitness across generations."""
+        import matplotlib.pyplot as plt
+        
+        # Sample generations for box plots (to avoid overcrowding)
+        total_gens = len(self.population_fitness_history)
+        if total_gens > 20:
+            # Sample every nth generation to show ~20 box plots
+            step = max(1, total_gens // 20)
+            sampled_indices = list(range(0, total_gens, step))
+            sampled_data = [self.population_fitness_history[i] for i in sampled_indices]
+            sampled_labels = [f"Gen {i+1}" for i in sampled_indices]
+        else:
+            sampled_data = self.population_fitness_history
+            sampled_labels = [f"Gen {i+1}" for i in range(total_gens)]
+        
+        plt.figure(figsize=(15, 8))
+        box_plot = plt.boxplot(sampled_data, labels=sampled_labels, patch_artist=True)
+        
+        # Color the boxes
+        colors = plt.cm.viridis(np.linspace(0, 1, len(sampled_data)))
+        for patch, color in zip(box_plot['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+        
+        plt.title('Population Fitness Distribution Across Generations', fontsize=14, fontweight='bold')
+        plt.xlabel('Generation', fontsize=12)
+        plt.ylabel('Average Fitness (Food Count)', fontsize=12)
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/population_fitness_boxplots.png", dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_survival_rate_evolution(self, save_dir):
+        """Plot the evolution of survival rates over generations."""
+        import matplotlib.pyplot as plt
+        
+        plt.figure(figsize=(12, 6))
+        generations = range(1, len(self.survival_rate_history) + 1)
+        
+        plt.plot(generations, self.survival_rate_history, 'g-', linewidth=2, marker='s', markersize=4)
+        plt.title('Evolution of Average Survival Rate Across Generations', fontsize=14, fontweight='bold')
+        plt.xlabel('Generation', fontsize=12)
+        plt.ylabel('Average Survival Rate', fontsize=12)
+        plt.ylim(0, 1.05)
+        plt.grid(True, alpha=0.3)
+        
+        # Add trend line
+        if len(self.survival_rate_history) > 1:
+            z = np.polyfit(generations, self.survival_rate_history, 1)
+            p = np.poly1d(z)
+            plt.plot(generations, p(generations), "r--", alpha=0.8, linewidth=1,
+                    label=f'Trend (slope: {z[0]:.4f})')
+            plt.legend()
+        
+        # Format y-axis as percentage
+        plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
+        
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/survival_rate_evolution.png", dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_combined_overview(self, save_dir):
+        """Plot a combined overview of all metrics."""
+        import matplotlib.pyplot as plt
+        
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+        generations = range(1, len(self.best_fitness_history) + 1)
+        
+        # Best fitness evolution
+        ax1.plot(generations, self.best_fitness_history, 'b-', linewidth=2, marker='o', markersize=3)
+        ax1.set_title('Best Fitness Evolution', fontweight='bold')
+        ax1.set_xlabel('Generation')
+        ax1.set_ylabel('Best Average Fitness')
+        ax1.grid(True, alpha=0.3)
+        
+        # Survival rate evolution
+        ax2.plot(generations, self.survival_rate_history, 'g-', linewidth=2, marker='s', markersize=3)
+        ax2.set_title('Survival Rate Evolution', fontweight='bold')
+        ax2.set_xlabel('Generation')
+        ax2.set_ylabel('Average Survival Rate')
+        ax2.set_ylim(0, 1.05)
+        ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
+        ax2.grid(True, alpha=0.3)
+        
+        # Population fitness statistics over time
+        if self.population_fitness_history:
+            pop_means = [np.mean(gen_fitness) for gen_fitness in self.population_fitness_history]
+            pop_stds = [np.std(gen_fitness) for gen_fitness in self.population_fitness_history]
+            
+            ax3.plot(generations, pop_means, 'purple', linewidth=2, label='Mean')
+            ax3.fill_between(generations, 
+                           [m - s for m, s in zip(pop_means, pop_stds)],
+                           [m + s for m, s in zip(pop_means, pop_stds)],
+                           alpha=0.3, color='purple', label='±1 Std Dev')
+            ax3.set_title('Population Fitness Statistics', fontweight='bold')
+            ax3.set_xlabel('Generation')
+            ax3.set_ylabel('Average Fitness')
+            ax3.legend()
+            ax3.grid(True, alpha=0.3)
+        
+        # Fitness improvement rate
+        if len(self.best_fitness_history) > 1:
+            improvement_rates = []
+            for i in range(1, len(self.best_fitness_history)):
+                rate = self.best_fitness_history[i] - self.best_fitness_history[i-1]
+                improvement_rates.append(rate)
+            
+            ax4.plot(range(2, len(self.best_fitness_history) + 1), improvement_rates, 
+                    'orange', linewidth=2, marker='d', markersize=3)
+            ax4.axhline(y=0, color='red', linestyle='--', alpha=0.5)
+            ax4.set_title('Fitness Improvement Rate', fontweight='bold')
+            ax4.set_xlabel('Generation')
+            ax4.set_ylabel('Fitness Change')
+            ax4.grid(True, alpha=0.3)
+        
+        plt.suptitle('Evolution Overview Dashboard', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/evolution_overview.png", dpi=300, bbox_inches='tight')
+        plt.close()
+    
     def reset(self):
         """Reset the evolution manager for a new run."""
         self.generation = 0
         self.generation_stats = []
+        self.best_agent_ever = None
+        self.best_fitness_ever = -1
+        
+        # Reset visualization data
+        self.best_fitness_history = []
+        self.population_fitness_history = []
+        self.survival_rate_history = []

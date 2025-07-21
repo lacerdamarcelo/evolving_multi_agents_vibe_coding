@@ -124,3 +124,35 @@ def create_offspring_network(parent_network):
     offspring.copy_weights_from(parent_network)
     offspring.mutate()
     return offspring
+
+
+def create_crossover_offspring(parent1_network, parent2_network):
+    """
+    Create an offspring network by crossing over two parent networks.
+    Randomly exchanges weights between the two parents.
+    
+    Args:
+        parent1_network: First parent network
+        parent2_network: Second parent network
+        
+    Returns:
+        AgentNeuralNetwork: New offspring network with crossed-over weights
+    """
+    import torch
+    import random
+    
+    offspring = AgentNeuralNetwork()
+    
+    with torch.no_grad():
+        # Iterate through all parameters and randomly choose from either parent
+        for offspring_param, parent1_param, parent2_param in zip(
+            offspring.parameters(), parent1_network.parameters(), parent2_network.parameters()
+        ):
+            # Create a random mask for crossover
+            mask = torch.rand_like(offspring_param) > 0.5
+            
+            # Use mask to select weights from either parent1 or parent2
+            offspring_param.data = torch.where(mask, parent1_param.data, parent2_param.data)
+    
+    # Note: Mutation is applied separately with configurable probability
+    return offspring
