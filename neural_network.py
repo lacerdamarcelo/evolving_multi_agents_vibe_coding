@@ -77,15 +77,21 @@ class AgentNeuralNetwork(nn.Module):
             
             return should_move_forward, should_rotate_right, should_rotate_left
     
-    def mutate(self):
+    def mutate(self, variance=None):
         """
         Mutate the network weights by adding Gaussian noise.
         Used for creating offspring in the evolutionary algorithm.
+        
+        Args:
+            variance: Mutation variance (uses MUTATION_VARIANCE if None)
         """
+        if variance is None:
+            variance = MUTATION_VARIANCE
+            
         with torch.no_grad():
             for param in self.parameters():
                 # Add Gaussian noise to each parameter in-place
-                noise = torch.normal(0, MUTATION_VARIANCE, param.shape)
+                noise = torch.normal(0, variance, param.shape)
                 param.data += noise
     
     def copy_weights_from(self, other_network):
@@ -159,7 +165,7 @@ class AttentionAgentNeuralNetwork(nn.Module):
         nn.init.normal_(self.agent_type_embed, mean=0.0, std=0.1)
         nn.init.normal_(self.food_type_embed, mean=0.0, std=0.1)
     
-    def forward(self, tokens_dict):
+    def forward(self, tokens_dict, return_attention=False):
         """
         Forward pass through the attention network.
         
@@ -168,9 +174,11 @@ class AttentionAgentNeuralNetwork(nn.Module):
                 - 'self': tensor of shape [2] (food_count, energy)
                 - 'agents': tensor of shape [N, 3] (distance, relative_angle, food_diff)
                 - 'food': tensor of shape [M, 2] (distance, relative_angle)
+            return_attention: If True, also return attention weights
         
         Returns:
             torch.Tensor: Output tensor of shape [4] (action probabilities)
+            torch.Tensor (optional): Attention weights if return_attention=True
         """
         # Embed tokens
         self_token = self.self_embedding(tokens_dict['self'].unsqueeze(0))  # [1, embed_dim]
@@ -198,6 +206,12 @@ class AttentionAgentNeuralNetwork(nn.Module):
         # Project to action space
         output = self.output_projection(self_attended)  # [4]
         output = torch.sigmoid(output)  # Apply sigmoid activation
+        
+        if return_attention:
+            # Return attention weights from the self token (first token) to all tokens
+            # Shape: [1+N+M] where first is self-attention, next N are agent attentions, last M are food attentions
+            self_attention_weights = attention_weights[0, 0, :]  # [1+N+M]
+            return output, self_attention_weights
         
         return output
     
@@ -237,15 +251,21 @@ class AttentionAgentNeuralNetwork(nn.Module):
             
             return should_move_forward, should_rotate_right, should_rotate_left
     
-    def mutate(self):
+    def mutate(self, variance=None):
         """
         Mutate the network weights by adding Gaussian noise.
         Used for creating offspring in the evolutionary algorithm.
+        
+        Args:
+            variance: Mutation variance (uses MUTATION_VARIANCE if None)
         """
+        if variance is None:
+            variance = MUTATION_VARIANCE
+            
         with torch.no_grad():
             for param in self.parameters():
                 # Add Gaussian noise to each parameter in-place
-                noise = torch.normal(0, MUTATION_VARIANCE, param.shape)
+                noise = torch.normal(0, variance, param.shape)
                 param.data += noise
     
     def copy_weights_from(self, other_network):
@@ -271,19 +291,20 @@ class AttentionAgentNeuralNetwork(nn.Module):
                     param.data.copy_(weights_dict[name])
 
 
-def create_offspring_network(parent_network):
+def create_offspring_network(parent_network, mutation_variance=None):
     """
     Create an offspring network by copying parent weights and mutating them.
     
     Args:
         parent_network: Parent network to create offspring from
+        mutation_variance: Variance for mutation (uses default if None)
         
     Returns:
         AttentionAgentNeuralNetwork: New mutated offspring network
     """
     offspring = AttentionAgentNeuralNetwork()
     offspring.copy_weights_from(parent_network)
-    offspring.mutate()
+    offspring.mutate(mutation_variance)
     return offspring
 
 

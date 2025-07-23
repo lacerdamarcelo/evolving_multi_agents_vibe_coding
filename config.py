@@ -30,8 +30,14 @@ ENERGY_FROM_FOOD = 50
 NUM_GENERATIONS = 1000
 ITERATIONS_PER_GENERATION = 500
 SURVIVAL_RATE = 0.2  # Top 20%
-MUTATION_VARIANCE = 0.05
+MUTATION_VARIANCE = 0.05  # Base mutation variance (used when cosine annealing is disabled)
 CROSSOVER_PROPORTION = 0.5  # 50% of offspring created through crossover, 50% through mutation
+
+# Cosine annealing mutation parameters
+MUTATION_VARIANCE_MAX = 0.05
+MUTATION_VARIANCE_MIN = 0.000001
+COSINE_ANNEALING_ALPHA = 10.0
+USE_COSINE_ANNEALING = True
 
 NUM_EVALUATION_RUNS = 30  # Number of runs to average performance over
 EVALUATION_ITERATIONS = 500  # Number of iterations per evaluation run

@@ -6,13 +6,15 @@ This script loads the saved best agent and runs it in a visual simulation.
 import arcade
 import math
 import time
+import sys
+import torch
 from environment import Environment
 from evolution import EvolutionManager
 from agent import Agent
 from config import (
     ENVIRONMENT_WIDTH, ENVIRONMENT_HEIGHT, BACKGROUND_COLOR, AGENT_COLOR,
     DIRECTION_LINE_COLOR, FOOD_COLOR, INITIAL_ENERGY, TEXT_COLOR, FONT_SIZE, FPS,
-    ITERATIONS_PER_GENERATION
+    ITERATIONS_PER_GENERATION, POPULATION_SIZE, NUM_FOOD_POINTS
 )
 
 
@@ -21,10 +23,15 @@ class BestAgentTest(arcade.Window):
     Test window to visualize the best evolved agent's performance.
     """
     
-    def __init__(self):
+    def __init__(self, visualize_attention=False):
         """Initialize the test window."""
         super().__init__(ENVIRONMENT_WIDTH, ENVIRONMENT_HEIGHT, "Best Agent Test")
         arcade.set_background_color(BACKGROUND_COLOR)
+        
+        # Attention visualization settings
+        self.visualize_attention = visualize_attention
+        self.attention_weights = None
+        self.tracked_agent_index = 0  # Agent index 0 is the tracked agent
         
         # Load the best agent
         self.evolution_manager = EvolutionManager()
@@ -48,8 +55,8 @@ class BestAgentTest(arcade.Window):
             agent.food_count = 0  # Reset food count
             agent.alive = True
         
-        # Keep reference to first agent as "best_agent" for UI display
-        self.best_agent = self.environment.agents[0] if self.environment.agents else None
+        # Keep reference to tracked agent (index 0)
+        self.tracked_agent = self.environment.agents[self.tracked_agent_index] if self.environment.agents else None
         
         # Test state
         self.current_iteration = 0
@@ -65,17 +72,72 @@ class BestAgentTest(arcade.Window):
         self.start_time = time.time()
         self.initial_food_count = 0
         
-        print(f"Testing best agent (original fitness: {self.best_agent.food_count})")
+        print(f"Testing best agent (original fitness: {self.tracked_agent.food_count})")
         print(f"Test will run for {self.max_iterations} iterations")
-        print("Controls: SPACE - Pause/Resume, R - Restart test, ESC - Exit")
+        print(f"Attention visualization: {'ENABLED' if self.visualize_attention else 'DISABLED'}")
+        print("Controls: SPACE - Pause/Resume, A - Toggle attention, R - Restart test, ESC - Exit")
         
     def setup(self):
         """Set up the test."""
         pass
     
+    def _get_attention_weights(self):
+        """Get attention weights from the tracked agent."""
+        if not self.visualize_attention or not self.tracked_agent or not self.tracked_agent.alive:
+            return None
+        
+        try:
+            # Get tokens from tracked agent
+            tokens_dict = self.tracked_agent.get_perception_tokens(
+                self.environment.agents, self.environment.food_points
+            )
+            
+            # Get attention weights from neural network
+            with torch.no_grad():
+                _, attention_weights = self.tracked_agent.neural_network.forward(
+                    tokens_dict, return_attention=True
+                )
+            
+            return attention_weights
+        except Exception as e:
+            print(f"Error getting attention weights: {e}")
+            return None
+    
+    def _attention_to_color(self, attention_value, base_color=(0, 0, 255)):
+        """
+        Convert attention value to color.
+        
+        Args:
+            attention_value: Attention weight (0.0 to 1.0)
+            base_color: Base color tuple (R, G, B)
+            
+        Returns:
+            tuple: Color tuple (R, G, B)
+        """
+        # Normalize attention value to [0, 1]
+        attention_value = max(0.0, min(1.0, attention_value))
+        
+        # Create color gradient from blue (low attention) to red (high attention)
+        if attention_value < 0.5:
+            # Blue to green gradient
+            r = 0
+            g = int(attention_value * 2 * 255)
+            b = int((1.0 - attention_value * 2) * 255)
+        else:
+            # Green to red gradient
+            r = int((attention_value - 0.5) * 2 * 255)
+            g = int((1.0 - (attention_value - 0.5) * 2) * 255)
+            b = 0
+        
+        return (r, g, b)
+    
     def on_draw(self):
         """Render the test."""
         self.clear()
+        
+        # Get attention weights if visualization is enabled
+        if self.visualize_attention:
+            self.attention_weights = self._get_attention_weights()
         
         # Draw food points
         self._draw_food_points()
@@ -87,22 +149,64 @@ class BestAgentTest(arcade.Window):
         self._draw_ui()
     
     def _draw_food_points(self):
-        """Draw all food points."""
-        for food in self.environment.food_points:
-            arcade.draw_circle_filled(
-                food.x, food.y, food.radius, FOOD_COLOR
-            )
+        """Draw all food points with attention-based coloring."""
+        for i, food in enumerate(self.environment.food_points):
+            color = FOOD_COLOR  # Default color
+            
+            # Apply attention-based coloring if enabled
+            if self.visualize_attention and self.attention_weights is not None:
+                # Food attention weights start after self token (index 0) and agent tokens (POPULATION_SIZE-1)
+                food_attention_start_idx = 1 + (POPULATION_SIZE - 1)
+                food_attention_idx = food_attention_start_idx + i
+                
+                if food_attention_idx < len(self.attention_weights):
+                    attention_value = self.attention_weights[food_attention_idx].item()
+                    color = self._attention_to_color(attention_value)
+            
+            arcade.draw_circle_filled(food.x, food.y, food.radius, color)
     
     def _draw_agents(self):
-        """Draw all agents with the same appearance (all have best neural network)."""
-        for agent in self.environment.agents:
+        """Draw all agents with attention-based coloring."""
+        for i, agent in enumerate(self.environment.agents):
             if agent.alive:
-                # All agents are equal now - they all have the best neural network
-                color = AGENT_COLOR  # Blue for all agents
+                # Default appearance
+                color = AGENT_COLOR
                 radius = agent.radius
                 line_width = 2
-                text_color = TEXT_COLOR  # Black text
+                text_color = TEXT_COLOR
                 text_size = FONT_SIZE
+                
+                # Highlight tracked agent (index 0)
+                if i == self.tracked_agent_index:
+                    color = (0, 255, 0)  # Green for tracked agent
+                    radius = agent.radius + 2
+                    line_width = 3
+                    text_color = (255, 255, 255)  # White text
+                    text_size = FONT_SIZE + 2
+                elif self.visualize_attention and self.attention_weights is not None:
+                    # Apply attention-based coloring for other agents
+                    # Agent attention weights start at index 1 (after self token)
+                    # We need to find the correct index for this agent in the attention weights
+                    
+                    # Create mapping from agent to attention index
+                    living_other_agents = [a for a in self.environment.agents if a.alive and a != self.tracked_agent]
+                    
+                    # Sort by distance to tracked agent (same as in get_perception_tokens)
+                    if self.tracked_agent and self.tracked_agent.alive:
+                        living_other_agents.sort(key=lambda a: 
+                            math.sqrt((a.x - self.tracked_agent.x)**2 + (a.y - self.tracked_agent.y)**2))
+                    
+                    # Find this agent's position in the sorted list
+                    try:
+                        agent_idx_in_attention = living_other_agents.index(agent)
+                        attention_idx = 1 + agent_idx_in_attention  # +1 to skip self token
+                        
+                        if attention_idx < len(self.attention_weights):
+                            attention_value = self.attention_weights[attention_idx].item()
+                            color = self._attention_to_color(attention_value)
+                    except (ValueError, IndexError):
+                        # Agent not found in list or index out of range, use default color
+                        pass
                 
                 # Draw agent body
                 arcade.draw_circle_filled(agent.x, agent.y, radius, color)
@@ -143,6 +247,9 @@ class BestAgentTest(arcade.Window):
             f"Elapsed Time: {elapsed_time:.1f}s"
         ]
         
+        # Add attention visualization status
+        info_lines.append(f"Attention Visualization: {'ON' if self.visualize_attention else 'OFF'}")
+        
         # Add pause/running status
         if self.paused:
             info_lines.append("PAUSED - Press SPACE to resume")
@@ -163,6 +270,7 @@ class BestAgentTest(arcade.Window):
         controls = [
             "Controls:",
             "SPACE - Pause/Resume",
+            "A - Toggle attention visualization",
             "R - Restart test",
             "ESC - Exit"
         ]
@@ -237,6 +345,11 @@ class BestAgentTest(arcade.Window):
             self.paused = not self.paused
             print("Test paused" if self.paused else "Test resumed")
         
+        elif key == arcade.key.A:
+            # Toggle attention visualization
+            self.visualize_attention = not self.visualize_attention
+            print(f"Attention visualization {'ENABLED' if self.visualize_attention else 'DISABLED'}")
+        
         elif key == arcade.key.R:
             # Restart test
             self._restart_test()
@@ -272,15 +385,23 @@ class BestAgentTest(arcade.Window):
 
 def main():
     """Main function to run the best agent test."""
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Test the best evolved agent with optional attention visualization")
+    parser.add_argument("--attention", "-a", action="store_true", 
+                       help="Enable attention visualization by default (default: False)")
+    args = parser.parse_args()
+    
     print("Starting Best Agent Test")
     print("=" * 50)
     print("This script will load and test the best evolved agent.")
     print("Make sure you have run the main evolution simulation first!")
     print("=" * 50)
     
-    # Create and run test
-    test = BestAgentTest()
-    if test.best_agent is not None:  # Only run if agent was loaded successfully
+    # Create and run test with optional attention visualization
+    test = BestAgentTest(visualize_attention=args.attention)
+    if hasattr(test, 'tracked_agent') and test.tracked_agent is not None:  # Only run if agent was loaded successfully
         test.setup()
         arcade.run()
 
