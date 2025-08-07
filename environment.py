@@ -142,18 +142,23 @@ class Environment:
         """
         Resolve collision between two agents.
         The agent with more food points survives and takes the other's food count.
+        The winner also absorbs energy equivalent to the food points taken.
         In case of tie, both die.
         """
         if not agent1.alive or not agent2.alive:
             return
         
         if agent1.food_count > agent2.food_count:
-            # Agent1 wins
-            agent1.food_count += agent2.food_count
+            # Agent1 wins - takes food points and corresponding energy
+            absorbed_food = agent2.food_count
+            agent1.food_count += absorbed_food
+            agent1.energy += absorbed_food * ENERGY_FROM_FOOD
             agent2.alive = False
         elif agent2.food_count > agent1.food_count:
-            # Agent2 wins
-            agent2.food_count += agent1.food_count
+            # Agent2 wins - takes food points and corresponding energy
+            absorbed_food = agent1.food_count
+            agent2.food_count += absorbed_food
+            agent2.energy += absorbed_food * ENERGY_FROM_FOOD
             agent1.alive = False
         else:
             # Tie - both die

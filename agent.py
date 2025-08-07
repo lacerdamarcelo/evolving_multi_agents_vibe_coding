@@ -4,7 +4,7 @@ Agent class for the evolutionary simulation.
 
 import math
 import torch
-from neural_network import AgentNeuralNetwork
+from neural_network import AttentionAgentNeuralNetwork
 from config import (
     AGENT_RADIUS, INITIAL_ENERGY, MOVE_DISTANCE, ROTATION_ANGLE,
     ENERGY_COST_IDLE, ENERGY_COST_ACTION, POPULATION_SIZE, NUM_FOOD_POINTS
@@ -34,24 +34,27 @@ class Agent:
         self.alive = True
         
         # Neural network for decision making
-        self.neural_network = AgentNeuralNetwork()
+        self.neural_network = AttentionAgentNeuralNetwork()
     
-    def get_perception_input(self, other_agents, food_points):
+    def get_perception_tokens(self, other_agents, food_points):
         """
-        Create input tensor for the neural network based on agent's perception.
+        Create structured tokens for the attention-based neural network.
         
         Args:
             other_agents: List of other agents in the environment
             food_points: List of food points in the environment
             
         Returns:
-            torch.Tensor: Input tensor for the neural network
+            dict: Dictionary containing structured tokens:
+                - 'self': tensor of shape [2] (food_count, energy)
+                - 'agents': tensor of shape [N, 3] (distance, relative_angle, food_diff)
+                - 'food': tensor of shape [M, 2] (distance, relative_angle)
         """
-        # Own state: [food_count, energy]
-        own_state = [self.food_count, self.energy]
+        # Self token: [food_count, energy]
+        self_token = torch.tensor([self.food_count, self.energy], dtype=torch.float32)
         
-        # Information about other agents: [distance, relative_angle, relative_food_count]
-        other_agents_info = []
+        # Agent tokens: [distance, relative_angle, food_diff]
+        agent_tokens_list = []
         
         for other_agent in other_agents:
             if other_agent.alive and other_agent != self:
@@ -70,25 +73,26 @@ class Agent:
                 while relative_angle < -180:
                     relative_angle += 360
                 
-                relative_food_count = self.food_count - other_agent.food_count
-                other_agents_info.append([distance, relative_angle, relative_food_count])
+                # Food difference (positive means other agent has more food)
+                food_diff = other_agent.food_count - self.food_count
+                
+                agent_tokens_list.append([distance, relative_angle, food_diff])
         
-        # Sort by distance (ascending)
-        other_agents_info.sort(key=lambda x: x[0])
+        # Sort by distance (closest first)
+        agent_tokens_list.sort(key=lambda x: x[0])
         
-        # Pad to fixed size (POPULATION_SIZE - 1)
+        # Pad to fixed size (POPULATION_SIZE - 1) for consistent tensor shapes
         max_other_agents = POPULATION_SIZE - 1
-        while len(other_agents_info) < max_other_agents:
-            other_agents_info.append([0.0, 0.0, 0.0])  # Padding with zeros
+        while len(agent_tokens_list) < max_other_agents:
+            agent_tokens_list.append([0.0, 0.0, 0.0])  # Padding with zeros
         
         # Truncate if too many (shouldn't happen in normal simulation)
-        other_agents_info = other_agents_info[:max_other_agents]
+        agent_tokens_list = agent_tokens_list[:max_other_agents]
         
-        # Flatten the other agents info
-        flattened_other_info = [item for sublist in other_agents_info for item in sublist]
+        agent_tokens = torch.tensor(agent_tokens_list, dtype=torch.float32)
         
-        # Information about food points: [distance, relative_angle]
-        food_points_info = []
+        # Food tokens: [distance, relative_angle]
+        food_tokens_list = []
         
         for food_point in food_points:
             # Calculate distance to food point
@@ -106,25 +110,25 @@ class Agent:
             while relative_angle < -180:
                 relative_angle += 360
             
-            food_points_info.append([distance, relative_angle])
+            food_tokens_list.append([distance, relative_angle])
         
         # Sort food points by distance (closest first)
-        food_points_info.sort(key=lambda x: x[0])
+        food_tokens_list.sort(key=lambda x: x[0])
         
-        # Pad to fixed size (NUM_FOOD_POINTS)
-        while len(food_points_info) < NUM_FOOD_POINTS:
-            food_points_info.append([0.0, 0.0])  # Padding with zeros
+        # Pad to fixed size (NUM_FOOD_POINTS) for consistent tensor shapes
+        while len(food_tokens_list) < NUM_FOOD_POINTS:
+            food_tokens_list.append([0.0, 0.0])  # Padding with zeros
         
         # Truncate if too many (shouldn't happen in normal simulation)
-        food_points_info = food_points_info[:NUM_FOOD_POINTS]
+        food_tokens_list = food_tokens_list[:NUM_FOOD_POINTS]
         
-        # Flatten the food points info
-        flattened_food_info = [item for sublist in food_points_info for item in sublist]
+        food_tokens = torch.tensor(food_tokens_list, dtype=torch.float32)
         
-        # Combine own state, other agents info, and food points info
-        full_input = own_state + flattened_other_info + flattened_food_info
-        
-        return torch.tensor(full_input, dtype=torch.float32)
+        return {
+            'self': self_token,
+            'agents': agent_tokens,
+            'food': food_tokens
+        }
     
     def decide_actions(self, other_agents, food_points):
         """
@@ -140,8 +144,8 @@ class Agent:
         if not self.alive:
             return False, False, False
         
-        input_tensor = self.get_perception_input(other_agents, food_points)
-        return self.neural_network.get_actions(input_tensor)
+        tokens_dict = self.get_perception_tokens(other_agents, food_points)
+        return self.neural_network.get_actions(tokens_dict)
     
     def rotate_right(self):
         """Rotate the agent clockwise by the rotation angle."""

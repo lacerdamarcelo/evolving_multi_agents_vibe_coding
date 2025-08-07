@@ -5,13 +5,35 @@ Evolutionary algorithm implementation for agent evolution.
 import random
 import numpy as np
 import torch
+import math
 from agent import Agent
 from neural_network import create_offspring_network, create_crossover_offspring
 from agent_evaluator import AgentEvaluator
 from config import (
     POPULATION_SIZE, SURVIVAL_RATE, ENVIRONMENT_WIDTH, ENVIRONMENT_HEIGHT,
-    NUM_EVALUATION_RUNS, EVALUATION_ITERATIONS, CROSSOVER_PROPORTION
+    NUM_EVALUATION_RUNS, EVALUATION_ITERATIONS, CROSSOVER_PROPORTION,
+    NUM_GENERATIONS, MUTATION_VARIANCE, MUTATION_VARIANCE_MAX, MUTATION_VARIANCE_MIN,
+    COSINE_ANNEALING_ALPHA, USE_COSINE_ANNEALING
 )
+
+
+def get_cosine_annealed_variance(current_gen, total_gens, max_var, min_var, alpha):
+    """
+    Calculate mutation variance using cosine annealing with multiple cycles.
+    
+    Args:
+        current_gen: Current generation number
+        total_gens: Total number of generations
+        max_var: Maximum variance value
+        min_var: Minimum variance value
+        alpha: Factor that defines intervals between peaks
+        
+    Returns:
+        float: Current mutation variance
+    """
+    cos_term = math.cos(alpha * math.pi * current_gen / total_gens)
+    variance = min_var + (max_var - min_var) * 0.5 * (1 + cos_term)
+    return variance
 
 
 class EvolutionManager:
@@ -31,6 +53,28 @@ class EvolutionManager:
         self.best_fitness_history = []  # Track best fitness per generation
         self.population_fitness_history = []  # Track all fitness values per generation
         self.survival_rate_history = []  # Track survival rates per generation
+        
+        # Track mutation variance for logging
+        self.mutation_variance_history = []
+    
+    def get_current_mutation_variance(self):
+        """
+        Get the current mutation variance based on cosine annealing schedule.
+        
+        Returns:
+            float: Current mutation variance
+        """
+        if USE_COSINE_ANNEALING:
+            variance = get_cosine_annealed_variance(
+                self.generation, 
+                NUM_GENERATIONS, 
+                MUTATION_VARIANCE_MAX, 
+                MUTATION_VARIANCE_MIN, 
+                COSINE_ANNEALING_ALPHA
+            )
+            return variance
+        else:
+            return MUTATION_VARIANCE
     
     def select_survivors(self, agents):
         """
@@ -120,9 +164,12 @@ class EvolutionManager:
         crossover_start_idx = len(survivors)
         crossover_end_idx = crossover_start_idx + (int(num_offspring_needed * CROSSOVER_PROPORTION) if len(survivors) > 1 else 0)
         
+        # Get current mutation variance
+        current_variance = self.get_current_mutation_variance()
+        
         for i in range(crossover_start_idx, crossover_end_idx):
             if i < len(new_agents):
-                new_agents[i].neural_network.mutate()
+                new_agents[i].neural_network.mutate(current_variance)
         
         return new_agents
     
@@ -167,8 +214,11 @@ class EvolutionManager:
         # Create new agent
         offspring = Agent(x, y, orientation)
         
-        # Create mutated neural network
-        offspring.neural_network = create_offspring_network(parent.neural_network)
+        # Get current mutation variance
+        current_variance = self.get_current_mutation_variance()
+        
+        # Create mutated neural network with current variance
+        offspring.neural_network = create_offspring_network(parent.neural_network, current_variance)
         
         return offspring
     
@@ -258,9 +308,17 @@ class EvolutionManager:
             self.best_fitness_ever = best_performer.food_count
             self.best_agent_ever = self._create_agent_copy(best_performer)
             print(f"New best agent found! Fitness: {self.best_fitness_ever}")
+            
+            # Automatically save the new best agent
+            self.save_best_agent("best_agent.pth")
+        
+        # Get current mutation variance and track it
+        current_variance = self.get_current_mutation_variance()
+        self.mutation_variance_history.append(current_variance)
         
         # Calculate generation statistics
         stats = self._calculate_generation_stats(current_agents, living_agents)
+        stats['mutation_variance'] = current_variance  # Add variance to stats
         self.generation_stats.append(stats)
         
         # Select survivors
@@ -268,6 +326,9 @@ class EvolutionManager:
         
         # Create next generation, passing the best performer for fallback
         new_agents = self.create_next_generation(survivors, best_performer)
+        
+        # Print generation info with mutation variance
+        print(f"Generation {self.generation + 1}: Mutation variance = {current_variance:.6f}")
         
         # Increment generation counter
         self.generation += 1
@@ -371,6 +432,9 @@ class EvolutionManager:
                 print(f"New best agent found! Average fitness: {self.best_fitness_ever:.2f} "
                       f"(survival rate: {best_results['survival_rate']:.1%}, "
                       f"std: {best_results['std_food_count']:.2f})")
+                
+                # Automatically save the new best agent
+                self.save_best_agent("best_agent.pth")
         
         # Select top performers based on average performance
         selected_agents = self.agent_evaluator.select_top_agents(evaluated_population)
