@@ -2,6 +2,16 @@
 Configuration parameters for the evolutionary agent simulation.
 """
 
+import os
+
+# Set multiprocessing start method for PyTorch compatibility
+os.environ['MPIRE_START_METHOD'] = 'spawn'
+
+# Parallel processing parameters
+NUM_WORKERS = 12
+ENABLE_PARALLEL_EVALUATION = True  # Allow users to disable if needed
+MEMORY_WARNING_THRESHOLD_GB = 8.0  # Warn if estimated memory usage exceeds this
+
 # Environment parameters
 ENVIRONMENT_WIDTH = 600
 ENVIRONMENT_HEIGHT = 600
@@ -27,7 +37,7 @@ FOOD_RADIUS = 5
 ENERGY_FROM_FOOD = 50
 
 # Evolution parameters
-NUM_GENERATIONS = 1000
+NUM_GENERATIONS = 2000
 ITERATIONS_PER_GENERATION = 500
 SURVIVAL_RATE = 0.2  # Top 20%
 MUTATION_VARIANCE = 0.05  # Base mutation variance (used when cosine annealing is disabled)
@@ -37,13 +47,14 @@ CROSSOVER_PROPORTION = 0.5  # 50% of offspring created through crossover, 50% th
 MUTATION_VARIANCE_MAX = 0.05
 MUTATION_VARIANCE_MIN = 0.000001
 COSINE_ANNEALING_ALPHA = 10.0
-USE_COSINE_ANNEALING = True
+USE_COSINE_ANNEALING = False
 
-NUM_EVALUATION_RUNS = 30  # Number of runs to average performance over
+NUM_EVALUATION_RUNS = 64  # Number of runs to average performance over
 EVALUATION_ITERATIONS = 500  # Number of iterations per evaluation run
 
 # Neural network parameters
-HIDDEN_LAYER_MULTIPLIER = 3
+NUM_HIDDEN_LAYERS = 3  # Number of hidden layers in the MLP (default: 2)
+HIDDEN_LAYER_MULTIPLIER = 4
 INPUT_SIZE = 2 + (3 * (POPULATION_SIZE - 1)) + (2 * NUM_FOOD_POINTS)  # own_state + other_agents_info + food_points_info
 HIDDEN_SIZE = INPUT_SIZE * HIDDEN_LAYER_MULTIPLIER
 OUTPUT_SIZE = 4

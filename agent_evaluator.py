@@ -4,10 +4,100 @@ Agent evaluation system for multi-run performance assessment.
 
 import copy
 import statistics
+import multiprocessing
+import os
+import psutil
 from environment import Environment
 from config import (
-    NUM_EVALUATION_RUNS, EVALUATION_ITERATIONS, SURVIVAL_RATE
+    NUM_EVALUATION_RUNS, EVALUATION_ITERATIONS, SURVIVAL_RATE,
+    NUM_WORKERS, ENABLE_PARALLEL_EVALUATION, MEMORY_WARNING_THRESHOLD_GB,
+    ENVIRONMENT_WIDTH, ENVIRONMENT_HEIGHT, INITIAL_ENERGY
 )
+
+# Set multiprocessing start method for PyTorch compatibility
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    # Start method already set
+    pass
+
+
+def run_competitive_scenario_worker(serialized_agents, num_iterations, run_idx, config_params):
+    """
+    Worker function for parallel competitive scenario execution.
+    Must be defined at module level for pickle serialization with spawn method.
+    
+    Args:
+        serialized_agents: List of serialized agent data
+        num_iterations: Number of iterations to run
+        run_idx: Run index for random seed
+        config_params: Configuration parameters
+        
+    Returns:
+        list: Results for each agent in the competitive scenario
+    """
+    import torch
+    import random
+    from environment import Environment
+    from agent import Agent
+    
+    # Set unique random seed for this worker
+    random.seed(run_idx * 1000)
+    torch.manual_seed(run_idx * 1000)
+    
+    # Reconstruct agents from serialized data
+    agent_copies = []
+    for agent_data in serialized_agents:
+        # Create new agent with reset state
+        agent_copy = Agent(
+            agent_data['x'], 
+            agent_data['y'], 
+            agent_data['orientation']
+        )
+        
+        # Load neural network weights
+        agent_copy.neural_network.load_state_dict(agent_data['nn_state_dict'])
+        
+        # Reset agent state for evaluation
+        agent_copy.energy = config_params['initial_energy']
+        agent_copy.food_count = 0
+        agent_copy.alive = True
+        
+        # Reset agent position randomly for this run
+        agent_copy.x = random.uniform(0, config_params['env_width'])
+        agent_copy.y = random.uniform(0, config_params['env_height'])
+        agent_copy.orientation = random.uniform(0, 360)
+        
+        agent_copies.append(agent_copy)
+    
+    # Create environment with all competing agents
+    environment = Environment()
+    environment.agents = agent_copies
+    
+    # Run the competitive scenario
+    final_iteration = 0
+    for iteration in range(num_iterations):
+        # Check if any agents are still alive
+        living_agents = [agent for agent in environment.agents if agent.alive]
+        if not living_agents:
+            break
+        
+        # Update the environment (all agents compete)
+        environment.update()
+        final_iteration = iteration
+    
+    # Collect results for each agent
+    results = []
+    for agent_copy in agent_copies:
+        result = {
+            'final_food_count': agent_copy.food_count,
+            'final_energy': agent_copy.energy,
+            'survived': agent_copy.alive,
+            'iterations_survived': final_iteration + 1 if agent_copy.alive else final_iteration
+        }
+        results.append(result)
+    
+    return results
 
 
 class AgentEvaluator:
@@ -70,6 +160,81 @@ class AgentEvaluator:
         
         print(f"Evaluating population of {len(agents)} agents in {num_runs} competitive scenarios...")
         
+        # Try parallel execution if enabled, fall back to sequential if it fails
+        if ENABLE_PARALLEL_EVALUATION and num_runs > 1:
+            try:
+                return self._evaluate_population_parallel(agents, num_runs, num_iterations)
+            except Exception as e:
+                print(f"Parallel execution failed ({e}), falling back to sequential...")
+                return self._evaluate_population_sequential(agents, num_runs, num_iterations)
+        else:
+            return self._evaluate_population_sequential(agents, num_runs, num_iterations)
+    
+    def _evaluate_population_parallel(self, agents, num_runs, num_iterations):
+        """
+        Parallel implementation using mpire with spawn method.
+        
+        Args:
+            agents: List of agents to evaluate
+            num_runs: Number of competitive evaluation runs
+            num_iterations: Number of iterations per run
+            
+        Returns:
+            list: List of tuples (agent, evaluation_results) sorted by average performance
+        """
+        try:
+            from mpire import WorkerPool
+        except ImportError:
+            raise ImportError("mpire not available for parallel processing")
+        
+        # Check memory requirements and determine optimal worker count
+        optimal_workers = self._estimate_optimal_workers(len(agents), num_runs)
+        
+        print(f"Running parallel evaluation with {optimal_workers} workers...")
+        
+        # Prepare serializable data for workers
+        worker_args = self._prepare_worker_arguments(agents, num_runs, num_iterations)
+        
+        # Use mpire WorkerPool with spawn method
+        try:
+            with WorkerPool(
+                n_jobs=optimal_workers,
+                start_method='spawn',
+                use_worker_state=False  # Important for spawn method
+            ) as pool:
+                # Run parallel competitive scenarios
+                all_scenario_results = pool.map(
+                    run_competitive_scenario_worker,
+                    worker_args,
+                    progress_bar=True,
+                    progress_bar_options={
+                        'desc': 'Running competitive scenarios',
+                        'unit': 'scenario',
+                        'total': num_runs
+                    }
+                )
+            
+            # Aggregate results from all parallel scenarios
+            return self._aggregate_parallel_results(all_scenario_results, agents)
+            
+        except Exception as e:
+            print(f"Error during parallel execution: {e}")
+            raise
+    
+    def _evaluate_population_sequential(self, agents, num_runs, num_iterations):
+        """
+        Sequential fallback implementation.
+        
+        Args:
+            agents: List of agents to evaluate
+            num_runs: Number of competitive evaluation runs
+            num_iterations: Number of iterations per run
+            
+        Returns:
+            list: List of tuples (agent, evaluation_results) sorted by average performance
+        """
+        print("Running sequential evaluation...")
+        
         # Initialize performance tracking for all agents
         agent_performances = [[] for _ in agents]
         
@@ -81,6 +246,117 @@ class AgentEvaluator:
             scenario_results = self._run_competitive_scenario(agents, num_iterations, run_idx)
             
             # Store results for each agent
+            for agent_idx, result in enumerate(scenario_results):
+                agent_performances[agent_idx].append(result)
+        
+        # Calculate average performance for each agent
+        population_results = []
+        for agent_idx, agent in enumerate(agents):
+            # Calculate average performance across all scenarios
+            avg_results = self._calculate_average_results(agent_performances[agent_idx])
+            
+            # Store results
+            population_results.append((agent, avg_results))
+        
+        # Sort by average performance (food count, survival rate, then energy as tiebreaker)
+        population_results.sort(
+            key=lambda x: (x[1]['avg_food_count'], x[1]['survival_rate'], x[1]['avg_final_energy']), 
+            reverse=True
+        )
+        
+        return population_results
+    
+    def _estimate_optimal_workers(self, num_agents, num_runs):
+        """
+        Estimate optimal number of workers based on memory constraints.
+        
+        Args:
+            num_agents: Number of agents in population
+            num_runs: Number of evaluation runs
+            
+        Returns:
+            int: Optimal number of workers
+        """
+        # Get current memory usage
+        memory = psutil.virtual_memory()
+        available_memory_gb = memory.available / (1024**3)
+        
+        # Estimate memory per worker (rough approximation)
+        # Each worker needs to hold a copy of all agents and environment
+        estimated_memory_per_worker = 0.1 + (num_agents * 0.01)  # GB
+        
+        # Calculate max workers based on memory
+        max_workers_by_memory = max(1, int(available_memory_gb / estimated_memory_per_worker))
+        
+        # Don't exceed configured workers or number of runs
+        optimal_workers = min(NUM_WORKERS, num_runs, max_workers_by_memory)
+        
+        # Warn if memory might be tight
+        estimated_total_memory = optimal_workers * estimated_memory_per_worker
+        if estimated_total_memory > MEMORY_WARNING_THRESHOLD_GB:
+            print(f"Warning: Estimated memory usage ({estimated_total_memory:.1f}GB) may be high")
+            print(f"Available memory: {available_memory_gb:.1f}GB")
+        
+        return optimal_workers
+    
+    def _prepare_worker_arguments(self, agents, num_runs, num_iterations):
+        """
+        Prepare serializable arguments for worker processes.
+        
+        Args:
+            agents: List of agents to evaluate
+            num_runs: Number of evaluation runs
+            num_iterations: Number of iterations per run
+            
+        Returns:
+            list: List of worker arguments for each run
+        """
+        import torch
+        
+        # Serialize agents for worker processes
+        serialized_agents = []
+        for agent in agents:
+            # Move neural network to CPU and get state dict for serialization
+            agent.neural_network.to('cpu')
+            agent_data = {
+                'x': agent.x,
+                'y': agent.y,
+                'orientation': agent.orientation,
+                'nn_state_dict': agent.neural_network.state_dict()
+            }
+            serialized_agents.append(agent_data)
+        
+        # Prepare configuration parameters
+        config_params = {
+            'initial_energy': INITIAL_ENERGY,
+            'env_width': ENVIRONMENT_WIDTH,
+            'env_height': ENVIRONMENT_HEIGHT
+        }
+        
+        # Create worker arguments for each run
+        worker_args = []
+        for run_idx in range(num_runs):
+            args = (serialized_agents, num_iterations, run_idx, config_params)
+            worker_args.append(args)
+        
+        return worker_args
+    
+    def _aggregate_parallel_results(self, all_scenario_results, agents):
+        """
+        Aggregate results from parallel competitive scenarios.
+        
+        Args:
+            all_scenario_results: List of results from each parallel scenario
+            agents: Original list of agents
+            
+        Returns:
+            list: List of tuples (agent, evaluation_results) sorted by average performance
+        """
+        # Initialize performance tracking for all agents
+        agent_performances = [[] for _ in agents]
+        
+        # Aggregate results from all scenarios
+        for scenario_results in all_scenario_results:
             for agent_idx, result in enumerate(scenario_results):
                 agent_performances[agent_idx].append(result)
         

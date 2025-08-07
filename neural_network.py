@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from config import INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, MUTATION_VARIANCE, POPULATION_SIZE, NUM_FOOD_POINTS
+from config import INPUT_SIZE, HIDDEN_SIZE, OUTPUT_SIZE, MUTATION_VARIANCE, POPULATION_SIZE, NUM_FOOD_POINTS, NUM_HIDDEN_LAYERS
 
 
 class AgentNeuralNetwork(nn.Module):
@@ -17,28 +17,43 @@ class AgentNeuralNetwork(nn.Module):
     Output: four decisions (move_forward, rotate_right_pref, rotate_left_pref, rotation_gate)
     """
     
-    def __init__(self):
+    def __init__(self, num_hidden_layers=None):
         super(AgentNeuralNetwork, self).__init__()
         
-        # Define layers
-        self.fc1 = nn.Linear(INPUT_SIZE, HIDDEN_SIZE)
-        self.fc2 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE)
-        self.fc3 = nn.Linear(HIDDEN_SIZE, OUTPUT_SIZE)
+        # Use provided parameter or default from config
+        if num_hidden_layers is None:
+            num_hidden_layers = NUM_HIDDEN_LAYERS
+        
+        # Create layers dynamically based on num_hidden_layers
+        self.layers = nn.ModuleList()
+        
+        # Input layer to first hidden layer
+        self.layers.append(nn.Linear(INPUT_SIZE, HIDDEN_SIZE))
+        
+        # Hidden layers (num_hidden_layers - 1 additional hidden layers)
+        for _ in range(num_hidden_layers - 1):
+            self.layers.append(nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE))
+        
+        # Final hidden layer to output
+        self.layers.append(nn.Linear(HIDDEN_SIZE, OUTPUT_SIZE))
         
         # Initialize weights randomly
         self._initialize_weights()
     
     def _initialize_weights(self):
         """Initialize network weights with small random values."""
-        for layer in [self.fc1, self.fc2, self.fc3]:
+        for layer in self.layers:
             nn.init.normal_(layer.weight, mean=0.0, std=0.1)
             nn.init.zeros_(layer.bias)
     
     def forward(self, x):
         """Forward pass through the network."""
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = torch.sigmoid(self.fc3(x))  # Output between 0 and 1
+        # Pass through all layers except the last one with ReLU activation
+        for layer in self.layers[:-1]:
+            x = F.relu(layer(x))
+        
+        # Apply sigmoid activation to the final layer (output layer)
+        x = torch.sigmoid(self.layers[-1](x))  # Output between 0 and 1
         return x
     
     def get_actions(self, input_tensor):

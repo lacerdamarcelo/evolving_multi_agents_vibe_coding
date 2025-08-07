@@ -3,3 +3,5 @@ torch
 arcade
 matplotlib
 numpy
+mpire
+psutil
